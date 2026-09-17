@@ -1031,10 +1031,7 @@ function CameraKit:SetFieldOfView(fieldOfView: number, options: FieldOfViewOptio
 		self:_captureIfNeeded(true)
 	end
 
-	local duration = resolvedOptions.Duration
-	if duration == nil then
-		duration = DEFAULT_FOV_DURATION
-	end
+	local duration = resolvedOptions.Duration or DEFAULT_FOV_DURATION
 	assertNonNegativeNumber(duration, "FieldOfView duration")
 
 	self:_cancelFieldOfViewAction()
@@ -1078,15 +1075,9 @@ function CameraKit:PulseFieldOfView(amount: number, options: FieldOfViewPulseOpt
 		self:_captureIfNeeded(true)
 	end
 
-	local attackDuration = resolvedOptions.AttackDuration
-	if attackDuration == nil then
-		attackDuration = DEFAULT_FOV_PULSE_ATTACK
-	end
+	local attackDuration = resolvedOptions.AttackDuration or DEFAULT_FOV_PULSE_ATTACK
 	local holdDuration = resolvedOptions.HoldDuration or 0
-	local releaseDuration = resolvedOptions.ReleaseDuration
-	if releaseDuration == nil then
-		releaseDuration = DEFAULT_FOV_PULSE_RELEASE
-	end
+	local releaseDuration = resolvedOptions.ReleaseDuration or DEFAULT_FOV_PULSE_RELEASE
 
 	assertNonNegativeNumber(attackDuration, "AttackDuration")
 	assertNonNegativeNumber(holdDuration, "HoldDuration")
@@ -1152,31 +1143,13 @@ function CameraKit:Shake(options: ShakeOptions?): CameraAction
 	self:_assertAlive()
 
 	local resolvedOptions: ShakeOptions = options or {}
-	local duration = resolvedOptions.Duration
-	if duration == nil then
-		duration = DEFAULT_SHAKE_DURATION
-	end
-	local magnitude = resolvedOptions.Magnitude
-	if magnitude == nil then
-		magnitude = DEFAULT_SHAKE_MAGNITUDE
-	end
-	local rotationMagnitude = resolvedOptions.RotationMagnitude
-	if rotationMagnitude == nil then
-		rotationMagnitude = DEFAULT_SHAKE_ROTATION
-	end
-	local frequency = resolvedOptions.Frequency
-	if frequency == nil then
-		frequency = DEFAULT_SHAKE_FREQUENCY
-	end
+	local duration = resolvedOptions.Duration or DEFAULT_SHAKE_DURATION
+	local magnitude = resolvedOptions.Magnitude or DEFAULT_SHAKE_MAGNITUDE
+	local rotationMagnitude = resolvedOptions.RotationMagnitude or DEFAULT_SHAKE_ROTATION
+	local frequency = resolvedOptions.Frequency or DEFAULT_SHAKE_FREQUENCY
 	local fadeIn = resolvedOptions.FadeIn or 0
-	local fadeOut = resolvedOptions.FadeOut
-	if fadeOut == nil then
-		fadeOut = math.min(DEFAULT_SHAKE_FADE_OUT, duration)
-	end
-	local seed = resolvedOptions.Seed
-	if seed == nil then
-		seed = Random.new():NextNumber(-1000, 1000)
-	end
+	local fadeOut = resolvedOptions.FadeOut or math.min(DEFAULT_SHAKE_FADE_OUT, duration)
+	local seed = resolvedOptions.Seed or Random.new():NextNumber(-1000, 1000)
 
 	assertNonNegativeNumber(duration, "Shake Duration")
 	assertNonNegativeNumber(magnitude, "Shake Magnitude")
@@ -1210,10 +1183,7 @@ function CameraKit:Recoil(options: RecoilOptions?): CameraAction
 	self:_assertAlive()
 
 	local resolvedOptions: RecoilOptions = options or {}
-	local duration = resolvedOptions.Duration
-	if duration == nil then
-		duration = DEFAULT_RECOIL_DURATION
-	end
+	local duration = resolvedOptions.Duration or DEFAULT_RECOIL_DURATION
 	local position = resolvedOptions.Position or DEFAULT_RECOIL_POSITION
 	local rotation = resolvedOptions.Rotation or DEFAULT_RECOIL_ROTATION
 	local easingStyle = resolvedOptions.EasingStyle or Enum.EasingStyle.Quad
@@ -1221,7 +1191,7 @@ function CameraKit:Recoil(options: RecoilOptions?): CameraAction
 
 	assertNonNegativeNumber(duration, "Recoil Duration")
 
-	return self:_addEffect(duration, function(elapsed)
+	return self:_addEffect(duration, function(elapsed: number)
 		local alpha = math.clamp(elapsed / duration, 0, 1)
 		local weight = 1 - TweenService:GetValue(alpha, easingStyle, easingDirection)
 		local currentPosition = position * weight
@@ -1253,13 +1223,8 @@ function CameraKit:Restore(state: CameraState?, options: RestoreOptions?): Camer
 
 	local resolvedOptions: RestoreOptions = options or {}
 	local duration = resolvedOptions.Duration
-	if duration == nil then
-		if resolvedOptions.TweenInfo then
-			duration = resolvedOptions.TweenInfo.Time
-		else
-			duration = 0
-		end
-	end
+		or (resolvedOptions.TweenInfo and resolvedOptions.TweenInfo.Time)
+		or 0
 	assertNonNegativeNumber(duration, "restore Duration")
 
 	self:_cancelCameraAction()
