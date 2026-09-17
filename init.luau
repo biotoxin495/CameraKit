@@ -9,32 +9,11 @@
 -- made with ❤️ by biotoxin495
 
 -- A lightweight client-side camera utility for Roblox.
-
+--
 -- CameraKit temporarily owns Workspace.CurrentCamera for scripted transitions,
 -- cinematic paths, subject changes, and field-of-view effects while leaving
 -- Roblox's default camera controller in charge during normal gameplay.
-
--- Usage:
--- 	local CameraKit = require(path.to.CameraKit)
--- 	local cameraKit = CameraKit.new()
-
--- 	local action = cameraKit:TweenTo(workspace.CameraPoint, {
--- 		Speed = 30,
--- 	})
-
--- 	action.Completed:Connect(function(result)
--- 		print("Camera transition:", result)
--- 	end)
-
--- 	-- Use PlayPath for cinematic sequences, SetFieldOfView for independent
--- 	-- FOV effects, and Restore to return control to the captured camera state.
-
--- Configuration (all optional; see the exported Config type):
--- 	DefaultSpeed: Default movement speed in studs per second.
--- 	MinDuration: Minimum duration for automatically timed transitions.
--- 	MaxDuration: Maximum duration for automatically timed transitions.
--- 	FocusDistance: Distance used to maintain Camera.Focus while CameraKit owns
--- 		the scriptable camera.
+-- Additive VFX such as shake and recoil can run over either camera mode.
 
 --//////////////////////////////////////////////////////////////////////////////
 -- Services and constants
@@ -51,6 +30,19 @@ local DEFAULT_MIN_DURATION = 0.1
 local DEFAULT_MAX_DURATION = 8
 local DEFAULT_FOCUS_DISTANCE = 32
 local DEFAULT_FOV_DURATION = 0.2
+
+local DEFAULT_SHAKE_DURATION = 0.5
+local DEFAULT_SHAKE_MAGNITUDE = 0.15
+local DEFAULT_SHAKE_ROTATION = 1.5
+local DEFAULT_SHAKE_FREQUENCY = 18
+local DEFAULT_SHAKE_FADE_OUT = 0.2
+
+local DEFAULT_RECOIL_DURATION = 0.25
+local DEFAULT_RECOIL_POSITION = Vector3.new(0, 0, 0.12)
+local DEFAULT_RECOIL_ROTATION = Vector3.new(-4, 0, 0)
+
+local DEFAULT_FOV_PULSE_ATTACK = 0.08
+local DEFAULT_FOV_PULSE_RELEASE = 0.22
 
 --//////////////////////////////////////////////////////////////////////////////
 -- Exported types
@@ -134,10 +126,40 @@ export type FieldOfViewOptions = {
 	EasingDirection: Enum.EasingDirection?,
 }
 
+export type ShakeOptions = {
+	Duration: number?,
+	Magnitude: number?,
+	RotationMagnitude: number?,
+	Frequency: number?,
+	FadeIn: number?,
+	FadeOut: number?,
+	Seed: number?,
+}
+
+export type RecoilOptions = {
+	Duration: number?,
+	Position: Vector3?,
+	Rotation: Vector3?,
+	EasingStyle: Enum.EasingStyle?,
+	EasingDirection: Enum.EasingDirection?,
+}
+
+export type FieldOfViewPulseOptions = {
+	AttackDuration: number?,
+	HoldDuration: number?,
+	ReleaseDuration: number?,
+	CaptureState: boolean?,
+	AttackEasingStyle: Enum.EasingStyle?,
+	AttackEasingDirection: Enum.EasingDirection?,
+	ReleaseEasingStyle: Enum.EasingStyle?,
+	ReleaseEasingDirection: Enum.EasingDirection?,
+}
+
 export type StopOptions = {
 	Restore: boolean?,
 	RestoreOptions: RestoreOptions?,
 	StopFieldOfView: boolean?,
+	StopEffects: boolean?,
 }
 
 export type CameraAction = {
@@ -156,6 +178,17 @@ type ActionInternal = CameraAction & {
 	_destroyed: boolean,
 	_finish: (self: ActionInternal, result: ActionResult) -> (),
 }
+
+type EffectInternal = {
+	Action: ActionInternal,
+	StartedAt: number,
+	Duration: number,
+	Update: (elapsed: number, deltaTime: number) -> CFrame,
+}
+
+--//////////////////////////////////////////////////////////////////////////////
+-- CameraAction
+--//////////////////////////////////////////////////////////////////////////////
 
 local CameraActionImpl = {}
 CameraActionImpl.__index = CameraActionImpl
@@ -227,9 +260,13 @@ function CameraActionImpl:Destroy()
 	self._event:Destroy()
 end
 
+--//////////////////////////////////////////////////////////////////////////////
+-- CameraKit
+--//////////////////////////////////////////////////////////////////////////////
+
 local CameraKit = {}
 CameraKit.__index = CameraKit
-CameraKit.Version = "0.1.0"
+CameraKit.Version = "1.1.0"
 
 export type CameraKit = typeof(setmetatable(
 	{} :: {
@@ -239,7 +276,9 @@ export type CameraKit = typeof(setmetatable(
 		_maxDuration: number,
 		_focusDistance: number,
 		_renderStepName: string,
+		_effectRenderStepName: string,
 		_focusBound: boolean,
+		_effectBound: boolean,
 		_ownsCamera: boolean,
 		_destroyed: boolean,
 		_savedState: CameraState?,
@@ -249,6 +288,9 @@ export type CameraKit = typeof(setmetatable(
 		_fovAction: ActionInternal?,
 		_fovTween: Tween?,
 		_fovThread: thread?,
+		_effects: { EffectInternal },
+		_effectLastOffset: CFrame,
+		_effectAppliedCFrame: CFrame?,
 		_currentCameraConnection: RBXScriptConnection?,
 	},
 	CameraKit
@@ -256,6 +298,10 @@ export type CameraKit = typeof(setmetatable(
 
 local function assertPositiveNumber(value: number, name: string)
 	assert(value > 0, string.format("CameraKit: %s must be greater than zero", name))
+end
+
+local function assertNonNegativeNumber(value: number, name: string)
+	assert(value >= 0, string.format("CameraKit: %s cannot be negative", name))
 end
 
 local function resolveTarget(target: CameraTarget): CFrame
@@ -285,6 +331,20 @@ local function unpackPathPoint(point: PathPoint): (CameraTarget, number?, number
 	return pointOptions.Target, pointOptions.Duration, pointOptions.Delay, pointOptions.TweenInfo
 end
 
+local function getEffectEnvelope(elapsed: number, duration: number, fadeIn: number, fadeOut: number): number
+	local envelope = 1
+
+	if fadeIn > 0 then
+		envelope = math.min(envelope, elapsed / fadeIn)
+	end
+
+	if fadeOut > 0 then
+		envelope = math.min(envelope, (duration - elapsed) / fadeOut)
+	end
+
+	return math.clamp(envelope, 0, 1)
+end
+
 function CameraKit.new(config: Config?): CameraKit
 	assert(RunService:IsClient(), "CameraKit can only be constructed on the client")
 
@@ -298,18 +358,21 @@ function CameraKit.new(config: Config?): CameraKit
 	local focusDistance = resolvedConfig.FocusDistance or DEFAULT_FOCUS_DISTANCE
 
 	assertPositiveNumber(defaultSpeed, "DefaultSpeed")
-	assert(minDuration >= 0, "CameraKit: MinDuration cannot be negative")
+	assertNonNegativeNumber(minDuration, "MinDuration")
 	assert(maxDuration >= minDuration, "CameraKit: MaxDuration must be at least MinDuration")
 	assertPositiveNumber(focusDistance, "FocusDistance")
 
+	local guid = HttpService:GenerateGUID(false)
 	local self: CameraKit = setmetatable({
 		_player = player,
 		_defaultSpeed = defaultSpeed,
 		_minDuration = minDuration,
 		_maxDuration = maxDuration,
 		_focusDistance = focusDistance,
-		_renderStepName = "CameraKitFocus_" .. HttpService:GenerateGUID(false),
+		_renderStepName = "CameraKitFocus_" .. guid,
+		_effectRenderStepName = "CameraKitEffects_" .. guid,
 		_focusBound = false,
+		_effectBound = false,
 		_ownsCamera = false,
 		_destroyed = false,
 		_savedState = nil,
@@ -319,6 +382,9 @@ function CameraKit.new(config: Config?): CameraKit
 		_fovAction = nil,
 		_fovTween = nil,
 		_fovThread = nil,
+		_effects = {},
+		_effectLastOffset = CFrame.new(),
+		_effectAppliedCFrame = nil,
 		_currentCameraConnection = nil,
 	}, CameraKit) :: any
 
@@ -329,6 +395,7 @@ function CameraKit.new(config: Config?): CameraKit
 
 		self:_cancelCameraAction()
 		self:_cancelFieldOfViewAction()
+		self:_cancelAllEffects()
 		self:_stopFocusTracking()
 		self._savedState = nil
 	end)
@@ -353,6 +420,14 @@ function CameraKit:_getCurrentHumanoid(): Humanoid?
 	end
 
 	return character:FindFirstChildOfClass("Humanoid")
+end
+
+function CameraKit:_getBaseCameraCFrame(camera: Camera): CFrame
+	if self._effectAppliedCFrame and camera.CFrame == self._effectAppliedCFrame then
+		return camera.CFrame * self._effectLastOffset:Inverse()
+	end
+
+	return camera.CFrame
 end
 
 function CameraKit:_startFocusTracking()
@@ -384,6 +459,156 @@ function CameraKit:_stopFocusTracking()
 	end
 end
 
+function CameraKit:_unbindEffectTracking()
+	if self._effectBound then
+		self._effectBound = false
+		RunService:UnbindFromRenderStep(self._effectRenderStepName)
+	end
+end
+
+function CameraKit:_clearAppliedEffectOffset()
+	local camera = Workspace.CurrentCamera
+	if camera and self._effectAppliedCFrame and camera.CFrame == self._effectAppliedCFrame then
+		camera.CFrame = camera.CFrame * self._effectLastOffset:Inverse()
+
+		if self._ownsCamera then
+			camera.Focus = camera.CFrame * CFrame.new(0, 0, -self._focusDistance)
+		end
+	end
+
+	self._effectLastOffset = CFrame.new()
+	self._effectAppliedCFrame = nil
+end
+
+function CameraKit:_stopEffectTracking()
+	self:_clearAppliedEffectOffset()
+	self:_unbindEffectTracking()
+end
+
+function CameraKit:_renderEffects(deltaTime: number)
+	local now = os.clock()
+	local completedActions: { ActionInternal } = {}
+
+	for index = #self._effects, 1, -1 do
+		local effect = self._effects[index]
+		if now - effect.StartedAt >= effect.Duration then
+			table.remove(self._effects, index)
+			table.insert(completedActions, effect.Action)
+		end
+	end
+
+	local camera = Workspace.CurrentCamera
+	if camera then
+		local baseCFrame = self:_getBaseCameraCFrame(camera)
+
+		if #self._effects == 0 then
+			camera.CFrame = baseCFrame
+
+			if self._ownsCamera then
+				camera.Focus = camera.CFrame * CFrame.new(0, 0, -self._focusDistance)
+			end
+
+			self._effectLastOffset = CFrame.new()
+			self._effectAppliedCFrame = nil
+			self:_unbindEffectTracking()
+		else
+			local combinedOffset = CFrame.new()
+
+			for _, effect in ipairs(self._effects) do
+				local elapsed = now - effect.StartedAt
+				combinedOffset = combinedOffset * effect.Update(elapsed, deltaTime)
+			end
+
+			camera.CFrame = baseCFrame * combinedOffset
+			self._effectLastOffset = combinedOffset
+			self._effectAppliedCFrame = camera.CFrame
+
+			if self._ownsCamera then
+				camera.Focus = camera.CFrame * CFrame.new(0, 0, -self._focusDistance)
+			end
+		end
+	elseif #self._effects == 0 then
+		self._effectLastOffset = CFrame.new()
+		self._effectAppliedCFrame = nil
+		self:_unbindEffectTracking()
+	end
+
+	for _, action in ipairs(completedActions) do
+		action:_finish("Completed")
+	end
+end
+
+function CameraKit:_startEffectTracking()
+	if self._effectBound then
+		return
+	end
+
+	self._effectBound = true
+	RunService:BindToRenderStep(self._effectRenderStepName, Enum.RenderPriority.Camera.Value + 2, function(deltaTime)
+		if self._destroyed then
+			return
+		end
+
+		self:_renderEffects(deltaTime)
+	end)
+end
+
+function CameraKit:_cancelEffect(effectToCancel: EffectInternal)
+	for index, effect in ipairs(self._effects) do
+		if effect == effectToCancel then
+			table.remove(self._effects, index)
+
+			if #self._effects == 0 then
+				self:_stopEffectTracking()
+			end
+
+			effect.Action:_finish("Cancelled")
+			return
+		end
+	end
+
+	effectToCancel.Action:_finish("Cancelled")
+end
+
+function CameraKit:_cancelAllEffects()
+	local effects = self._effects
+	self._effects = {}
+	self:_stopEffectTracking()
+
+	for _, effect in ipairs(effects) do
+		effect.Action:_finish("Cancelled")
+	end
+end
+
+function CameraKit:_addEffect(duration: number, update: (elapsed: number, deltaTime: number) -> CFrame): CameraAction
+	if duration == 0 then
+		local action = CameraActionImpl.new(nil)
+		action:_finish("Completed")
+		return action
+	end
+
+	local effect: EffectInternal? = nil
+	local action = CameraActionImpl.new(function()
+		local currentEffect = effect
+		if currentEffect then
+			self:_cancelEffect(currentEffect)
+		end
+	end)
+
+	local createdEffect: EffectInternal = {
+		Action = action,
+		StartedAt = os.clock(),
+		Duration = duration,
+		Update = update,
+	}
+	effect = createdEffect
+
+	table.insert(self._effects, createdEffect)
+	self:_startEffectTracking()
+
+	return action
+end
+
 function CameraKit:_captureIfNeeded(shouldCapture: boolean?)
 	if shouldCapture == false or self._savedState ~= nil then
 		return
@@ -401,7 +626,7 @@ function CameraKit:_calculateDuration(
 	maxDuration: number?
 ): number
 	if explicitDuration ~= nil then
-		assert(explicitDuration >= 0, "CameraKit: Duration cannot be negative")
+		assertNonNegativeNumber(explicitDuration, "Duration")
 		return explicitDuration
 	end
 
@@ -410,7 +635,7 @@ function CameraKit:_calculateDuration(
 	local resolvedMax = maxDuration or self._maxDuration
 
 	assertPositiveNumber(resolvedSpeed, "Speed")
-	assert(resolvedMin >= 0, "CameraKit: MinDuration cannot be negative")
+	assertNonNegativeNumber(resolvedMin, "MinDuration")
 	assert(resolvedMax >= resolvedMin, "CameraKit: MaxDuration must be at least MinDuration")
 
 	local distance = (toCFrame.Position - fromCFrame.Position).Magnitude
@@ -505,6 +730,36 @@ function CameraKit:_runCameraTween(
 	return playbackState
 end
 
+function CameraKit:_runFieldOfViewTween(
+	action: ActionInternal,
+	fieldOfView: number,
+	tweenInfo: TweenInfo
+): Enum.PlaybackState
+	local camera = self:_getCamera()
+
+	if tweenInfo.Time == 0 then
+		camera.FieldOfView = fieldOfView
+		return Enum.PlaybackState.Completed
+	end
+
+	local tween = TweenService:Create(camera, tweenInfo, { FieldOfView = fieldOfView })
+	self._fovTween = tween
+	tween:Play()
+	local playbackState = tween.Completed:Wait()
+
+	if self._fovTween == tween then
+		self._fovTween = nil
+	end
+
+	tween:Destroy()
+
+	if self._fovAction ~= action then
+		return Enum.PlaybackState.Cancelled
+	end
+
+	return playbackState
+end
+
 function CameraKit:_resolveRestoredSubject(subject: Instance?): Instance?
 	if subject and subject.Parent then
 		return subject
@@ -531,16 +786,26 @@ function CameraKit:_applyState(state: CameraState)
 	camera.CameraType = state.CameraType
 end
 
+--//////////////////////////////////////////////////////////////////////////////
+-- Public state and movement API
+--//////////////////////////////////////////////////////////////////////////////
+
 function CameraKit:CaptureState(): CameraState
 	self:_assertAlive()
 
 	local camera = self:_getCamera()
+	local cframe = self:_getBaseCameraCFrame(camera)
+	local focus = camera.Focus
+
+	if self._ownsCamera and cframe ~= camera.CFrame then
+		focus = cframe * CFrame.new(0, 0, -self._focusDistance)
+	end
 
 	return {
 		CameraType = camera.CameraType,
 		CameraSubject = camera.CameraSubject,
-		CFrame = camera.CFrame,
-		Focus = camera.Focus,
+		CFrame = cframe,
+		Focus = focus,
 		FieldOfView = camera.FieldOfView,
 		FieldOfViewMode = camera.FieldOfViewMode,
 		CameraMinZoomDistance = self._player.CameraMinZoomDistance,
@@ -569,7 +834,7 @@ function CameraKit:TweenTo(target: CameraTarget, options: TransitionOptions?): C
 		duration = resolvedOptions.TweenInfo.Time
 	else
 		duration = self:_calculateDuration(
-			camera.CFrame,
+			self:_getBaseCameraCFrame(camera),
 			targetCFrame,
 			resolvedOptions.Duration,
 			resolvedOptions.Speed,
@@ -672,7 +937,7 @@ function CameraKit:PlayPath(points: { PathPoint }, options: PathOptions?): Camer
 					duration = explicitTweenInfo.Time
 				else
 					duration = self:_calculateDuration(
-						camera.CFrame,
+						self:_getBaseCameraCFrame(camera),
 						targetCFrame,
 						pointDuration,
 						resolvedOptions.Speed,
@@ -718,6 +983,7 @@ function CameraKit:PlayPath(points: { PathPoint }, options: PathOptions?): Camer
 		if resolvedOptions.RestoreOnComplete and self._savedState then
 			local savedState = self._savedState
 			self._savedState = nil
+			self:_cancelAllEffects()
 			self:_applyState(savedState)
 		end
 
@@ -741,8 +1007,8 @@ function CameraKit:SetSubject(subject: Instance, options: SubjectOptions?)
 
 	local minZoomDistance = resolvedOptions.MinZoomDistance or self._player.CameraMinZoomDistance
 	local maxZoomDistance = resolvedOptions.MaxZoomDistance or self._player.CameraMaxZoomDistance
-	assert(minZoomDistance >= 0, "CameraKit: MinZoomDistance cannot be negative")
-	assert(maxZoomDistance >= 0, "CameraKit: MaxZoomDistance cannot be negative")
+	assertNonNegativeNumber(minZoomDistance, "MinZoomDistance")
+	assertNonNegativeNumber(maxZoomDistance, "MaxZoomDistance")
 	assert(minZoomDistance <= maxZoomDistance, "CameraKit: MinZoomDistance cannot exceed MaxZoomDistance")
 
 	local camera = self:_getCamera()
@@ -751,6 +1017,10 @@ function CameraKit:SetSubject(subject: Instance, options: SubjectOptions?)
 	self._player.CameraMinZoomDistance = minZoomDistance
 	self._player.CameraMaxZoomDistance = maxZoomDistance
 end
+
+--//////////////////////////////////////////////////////////////////////////////
+-- Public field-of-view API
+--//////////////////////////////////////////////////////////////////////////////
 
 function CameraKit:SetFieldOfView(fieldOfView: number, options: FieldOfViewOptions?): CameraAction
 	self:_assertAlive()
@@ -765,11 +1035,10 @@ function CameraKit:SetFieldOfView(fieldOfView: number, options: FieldOfViewOptio
 	if duration == nil then
 		duration = DEFAULT_FOV_DURATION
 	end
-	assert(duration >= 0, "CameraKit: FieldOfView duration cannot be negative")
+	assertNonNegativeNumber(duration, "FieldOfView duration")
 
 	self:_cancelFieldOfViewAction()
 
-	local camera = self:_getCamera()
 	local tweenInfo = self:_buildTweenInfo(
 		duration,
 		resolvedOptions.TweenInfo,
@@ -788,25 +1057,8 @@ function CameraKit:SetFieldOfView(fieldOfView: number, options: FieldOfViewOptio
 
 	self._fovAction = action
 	self._fovThread = task.spawn(function()
-		if tweenInfo.Time == 0 then
-			camera.FieldOfView = fieldOfView
-		else
-			local tween = TweenService:Create(camera, tweenInfo, { FieldOfView = fieldOfView })
-			self._fovTween = tween
-			tween:Play()
-			local playbackState = tween.Completed:Wait()
-
-			if self._fovTween == tween then
-				self._fovTween = nil
-			end
-			tween:Destroy()
-
-			if playbackState ~= Enum.PlaybackState.Completed then
-				return
-			end
-		end
-
-		if self._fovAction ~= action then
+		local playbackState = self:_runFieldOfViewTween(action, fieldOfView, tweenInfo)
+		if playbackState ~= Enum.PlaybackState.Completed or self._fovAction ~= action then
 			return
 		end
 
@@ -817,6 +1069,181 @@ function CameraKit:SetFieldOfView(fieldOfView: number, options: FieldOfViewOptio
 
 	return action
 end
+
+function CameraKit:PulseFieldOfView(amount: number, options: FieldOfViewPulseOptions?): CameraAction
+	self:_assertAlive()
+
+	local resolvedOptions: FieldOfViewPulseOptions = options or {}
+	if resolvedOptions.CaptureState == true then
+		self:_captureIfNeeded(true)
+	end
+
+	local attackDuration = resolvedOptions.AttackDuration
+	if attackDuration == nil then
+		attackDuration = DEFAULT_FOV_PULSE_ATTACK
+	end
+	local holdDuration = resolvedOptions.HoldDuration or 0
+	local releaseDuration = resolvedOptions.ReleaseDuration
+	if releaseDuration == nil then
+		releaseDuration = DEFAULT_FOV_PULSE_RELEASE
+	end
+
+	assertNonNegativeNumber(attackDuration, "AttackDuration")
+	assertNonNegativeNumber(holdDuration, "HoldDuration")
+	assertNonNegativeNumber(releaseDuration, "ReleaseDuration")
+
+	self:_cancelFieldOfViewAction()
+
+	local camera = self:_getCamera()
+	local startingFieldOfView = camera.FieldOfView
+	local peakFieldOfView = math.clamp(startingFieldOfView + amount, 1, 120)
+	local attackTweenInfo = TweenInfo.new(
+		attackDuration,
+		resolvedOptions.AttackEasingStyle or Enum.EasingStyle.Quad,
+		resolvedOptions.AttackEasingDirection or Enum.EasingDirection.Out
+	)
+	local releaseTweenInfo = TweenInfo.new(
+		releaseDuration,
+		resolvedOptions.ReleaseEasingStyle or Enum.EasingStyle.Quint,
+		resolvedOptions.ReleaseEasingDirection or Enum.EasingDirection.Out
+	)
+
+	local action: ActionInternal
+	action = CameraActionImpl.new(function()
+		if self._fovAction == action then
+			self:_cancelFieldOfViewAction()
+		else
+			action:_finish("Cancelled")
+		end
+	end)
+
+	self._fovAction = action
+	self._fovThread = task.spawn(function()
+		local playbackState = self:_runFieldOfViewTween(action, peakFieldOfView, attackTweenInfo)
+		if playbackState ~= Enum.PlaybackState.Completed or self._fovAction ~= action then
+			return
+		end
+
+		if holdDuration > 0 then
+			task.wait(holdDuration)
+			if self._fovAction ~= action then
+				return
+			end
+		end
+
+		playbackState = self:_runFieldOfViewTween(action, startingFieldOfView, releaseTweenInfo)
+		if playbackState ~= Enum.PlaybackState.Completed or self._fovAction ~= action then
+			return
+		end
+
+		self._fovAction = nil
+		self._fovThread = nil
+		action:_finish("Completed")
+	end)
+
+	return action
+end
+
+--//////////////////////////////////////////////////////////////////////////////
+-- Public additive VFX API
+--//////////////////////////////////////////////////////////////////////////////
+
+function CameraKit:Shake(options: ShakeOptions?): CameraAction
+	self:_assertAlive()
+
+	local resolvedOptions: ShakeOptions = options or {}
+	local duration = resolvedOptions.Duration
+	if duration == nil then
+		duration = DEFAULT_SHAKE_DURATION
+	end
+	local magnitude = resolvedOptions.Magnitude
+	if magnitude == nil then
+		magnitude = DEFAULT_SHAKE_MAGNITUDE
+	end
+	local rotationMagnitude = resolvedOptions.RotationMagnitude
+	if rotationMagnitude == nil then
+		rotationMagnitude = DEFAULT_SHAKE_ROTATION
+	end
+	local frequency = resolvedOptions.Frequency
+	if frequency == nil then
+		frequency = DEFAULT_SHAKE_FREQUENCY
+	end
+	local fadeIn = resolvedOptions.FadeIn or 0
+	local fadeOut = resolvedOptions.FadeOut
+	if fadeOut == nil then
+		fadeOut = math.min(DEFAULT_SHAKE_FADE_OUT, duration)
+	end
+	local seed = resolvedOptions.Seed
+	if seed == nil then
+		seed = Random.new():NextNumber(-1000, 1000)
+	end
+
+	assertNonNegativeNumber(duration, "Shake Duration")
+	assertNonNegativeNumber(magnitude, "Shake Magnitude")
+	assertNonNegativeNumber(rotationMagnitude, "Shake RotationMagnitude")
+	assertPositiveNumber(frequency, "Shake Frequency")
+	assertNonNegativeNumber(fadeIn, "Shake FadeIn")
+	assertNonNegativeNumber(fadeOut, "Shake FadeOut")
+
+	return self:_addEffect(duration, function(elapsed)
+		local envelope = getEffectEnvelope(elapsed, duration, fadeIn, fadeOut)
+		local phase = elapsed * frequency
+
+		local position = Vector3.new(
+			math.noise(seed, phase, 0),
+			math.noise(seed + 17.17, phase, 0),
+			math.noise(seed + 41.73, phase, 0)
+		) * magnitude * envelope
+
+		local rotation = Vector3.new(
+			math.noise(seed + 73.11, phase, 0),
+			math.noise(seed + 101.91, phase, 0),
+			math.noise(seed + 149.37, phase, 0)
+		) * rotationMagnitude * envelope
+
+		return CFrame.new(position)
+			* CFrame.Angles(math.rad(rotation.X), math.rad(rotation.Y), math.rad(rotation.Z))
+	end)
+end
+
+function CameraKit:Recoil(options: RecoilOptions?): CameraAction
+	self:_assertAlive()
+
+	local resolvedOptions: RecoilOptions = options or {}
+	local duration = resolvedOptions.Duration
+	if duration == nil then
+		duration = DEFAULT_RECOIL_DURATION
+	end
+	local position = resolvedOptions.Position or DEFAULT_RECOIL_POSITION
+	local rotation = resolvedOptions.Rotation or DEFAULT_RECOIL_ROTATION
+	local easingStyle = resolvedOptions.EasingStyle or Enum.EasingStyle.Quad
+	local easingDirection = resolvedOptions.EasingDirection or Enum.EasingDirection.Out
+
+	assertNonNegativeNumber(duration, "Recoil Duration")
+
+	return self:_addEffect(duration, function(elapsed)
+		local alpha = math.clamp(elapsed / duration, 0, 1)
+		local weight = 1 - TweenService:GetValue(alpha, easingStyle, easingDirection)
+		local currentPosition = position * weight
+		local currentRotation = rotation * weight
+
+		return CFrame.new(currentPosition)
+			* CFrame.Angles(
+				math.rad(currentRotation.X),
+				math.rad(currentRotation.Y),
+				math.rad(currentRotation.Z)
+			)
+	end)
+end
+
+function CameraKit:StopEffects()
+	self:_assertAlive()
+	self:_cancelAllEffects()
+end
+
+--//////////////////////////////////////////////////////////////////////////////
+-- Restore and lifecycle
+--//////////////////////////////////////////////////////////////////////////////
 
 function CameraKit:Restore(state: CameraState?, options: RestoreOptions?): CameraAction
 	self:_assertAlive()
@@ -833,10 +1260,11 @@ function CameraKit:Restore(state: CameraState?, options: RestoreOptions?): Camer
 			duration = 0
 		end
 	end
-	assert(duration >= 0, "CameraKit: restore Duration cannot be negative")
+	assertNonNegativeNumber(duration, "restore Duration")
 
 	self:_cancelCameraAction()
 	self:_cancelFieldOfViewAction()
+	self:_cancelAllEffects()
 
 	local action: ActionInternal
 	action = CameraActionImpl.new(function()
@@ -904,6 +1332,10 @@ function CameraKit:Stop(options: StopOptions?): CameraAction?
 		self:_cancelFieldOfViewAction()
 	end
 
+	if resolvedOptions.StopEffects ~= false then
+		self:_cancelAllEffects()
+	end
+
 	if resolvedOptions.Restore then
 		return self:Restore(nil, resolvedOptions.RestoreOptions)
 	end
@@ -913,7 +1345,7 @@ end
 
 function CameraKit:IsActive(): boolean
 	self:_assertAlive()
-	return self._cameraAction ~= nil or self._fovAction ~= nil
+	return self._cameraAction ~= nil or self._fovAction ~= nil or #self._effects > 0
 end
 
 function CameraKit:Destroy(restoreCamera: boolean?)
@@ -921,8 +1353,11 @@ function CameraKit:Destroy(restoreCamera: boolean?)
 		return
 	end
 
+	self._destroyed = true
+
 	self:_cancelCameraAction()
 	self:_cancelFieldOfViewAction()
+	self:_cancelAllEffects()
 
 	if restoreCamera ~= false and self._savedState then
 		self:_applyState(self._savedState)
@@ -936,8 +1371,6 @@ function CameraKit:Destroy(restoreCamera: boolean?)
 		self._currentCameraConnection:Disconnect()
 		self._currentCameraConnection = nil
 	end
-
-	self._destroyed = true
 end
 
 return CameraKit
