@@ -15,6 +15,107 @@
 -- Roblox's default camera controller in charge during normal gameplay.
 -- Additive VFX such as shake and recoil can run over either camera mode.
 
+-- Quick start:
+-- 	local CameraKit = require(path.to.CameraKit)
+-- 	local cameraKit = CameraKit.new()
+--
+-- 	local action = cameraKit:TweenTo(workspace.CameraPoint, {
+-- 		Speed = 30,
+-- 	})
+--
+-- 	action.Completed:Connect(function(result)
+-- 		print(result) -- "Completed" or "Cancelled"
+-- 	end)
+--
+-- 	-- Return the camera to the state captured before scripted movement.
+-- 	cameraKit:Restore()
+
+-- Construction:
+-- 	CameraKit.new(config?) -> CameraKit
+-- 		Creates a client-only controller. Configuration fields are:
+-- 		DefaultSpeed, MinDuration, MaxDuration, and FocusDistance.
+-- 		A single long-lived instance is recommended for each client system.
+
+-- Movement and camera state:
+-- 	cameraKit:TweenTo(target, options?) -> CameraAction
+-- 		Tweens to a CFrame, BasePart, or Attachment. Supply Duration or Speed,
+-- 		optional duration limits/easing, and CaptureState.
+--
+-- 	cameraKit:PlayPath(points, options?) -> CameraAction
+-- 		Plays an ordered path. Each point may be a target or a table containing
+-- 		Target, Duration, Delay, and TweenInfo. Paths support looping, callbacks,
+-- 		per-path easing, snapping to the first point, and restore-on-completion.
+--
+-- 	cameraKit:SetSubject(subject, options?)
+-- 		Sets CameraSubject to a Humanoid or BasePart and optionally changes the
+-- 		camera type and the player's minimum/maximum zoom distances.
+--
+-- 	cameraKit:CaptureState() -> CameraState
+-- 		Returns the current type, subject, transform, focus, FOV, FOV mode, and
+-- 		player zoom limits without changing the internally saved state.
+--
+-- 	cameraKit:GetSavedState() -> CameraState?
+-- 		Returns the state automatically saved before CameraKit first takes over.
+--
+-- 	cameraKit:Restore(state?, options?) -> CameraAction
+-- 		Restores an explicit state or the internally saved state. Restoration may
+-- 		be immediate or tweened and can optionally retain the saved state.
+
+-- Field of view:
+-- 	cameraKit:SetFieldOfView(fieldOfView, options?) -> CameraAction
+-- 		Sets or tweens FOV from 1 through 120. This uses its own action channel,
+-- 		so it can run at the same time as positional movement.
+--
+-- 	cameraKit:PulseFieldOfView(amount, options?) -> CameraAction
+-- 		Adds amount to the current FOV, holds it if requested, then returns to the
+-- 		starting FOV. Attack and release durations/easing are configurable.
+
+-- Additive effects:
+-- 	cameraKit:Shake(options?) -> CameraAction
+-- 		Applies procedural positional and rotational shake. Configure Duration,
+-- 		Magnitude, RotationMagnitude, Frequency, FadeIn, FadeOut, and Seed.
+--
+-- 	cameraKit:Recoil(options?) -> CameraAction
+-- 		Applies a positional/rotational kick that eases back to neutral. Configure
+-- 		Duration, Position, Rotation, EasingStyle, and EasingDirection.
+--
+-- 	cameraKit:StopEffects()
+-- 		Cancels every active shake or recoil effect without stopping movement/FOV.
+
+-- Lifecycle and status:
+-- 	cameraKit:Stop(options?) -> CameraAction?
+-- 		Cancels positional movement and, by default, FOV and additive effects.
+-- 		Set Restore to return to the saved state; the returned action represents
+-- 		that restoration. StopFieldOfView and StopEffects can preserve channels.
+--
+-- 	cameraKit:IsActive() -> boolean
+-- 		Reports whether movement, FOV work, shake, or recoil is active.
+--
+-- 	cameraKit:Destroy(restoreCamera?)
+-- 		Cancels all work, disconnects the controller, and restores the saved state
+-- 		unless false is passed. A destroyed controller cannot be reused.
+
+-- CameraAction handles:
+-- 	action.Completed:Connect(callback)
+-- 		Fires once with "Completed" or "Cancelled".
+-- 	action:Cancel()
+-- 		Cancels the action if it is still running.
+-- 	action:Await() -> ActionResult
+-- 		Yields until completion and returns the result.
+-- 	action:IsPlaying() -> boolean
+-- 		Returns whether the action is unfinished.
+-- 	action:GetResult() -> ActionResult?
+-- 		Returns the stored result, or nil while running.
+-- 	action:Destroy()
+-- 		Cancels unfinished work and destroys the handle's completion event.
+
+-- Ownership notes:
+-- 	Starting TweenTo, PlayPath, or an animated Restore cancels the previous
+-- 	positional action. Starting SetFieldOfView or PulseFieldOfView cancels the
+-- 	previous FOV action. Shake and Recoil are additive and may overlap each
+-- 	other and either camera mode. Most ownership-taking methods capture the
+-- 	pre-scripted camera state by default; call Restore when control should return.
+
 --//////////////////////////////////////////////////////////////////////////////
 -- Services and constants
 --//////////////////////////////////////////////////////////////////////////////
