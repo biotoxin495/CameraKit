@@ -1,0 +1,19 @@
+[package]
+name = "biotoxin495/paginationhandler"
+description = "A data processing, pagination, and index-window virtualization utility for Roblox."
+version = "1.0.0"
+license = "MIT"
+authors = ["biotoxin495"]
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+repository = "https://github.com/biotoxin495/Dropdown"
+
+exclude = [
+	"examples",
+	"docs",
+	".github",
+	"*.rbxl",
+	"*.rbxlx",
+]
+
+[dependencies]
